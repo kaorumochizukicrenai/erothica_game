@@ -1,0 +1,923 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Runner Click Jump (v3)</title>
+  <style>
+    :root{
+      /* Canvas解像度（内部座標） */
+      --cw: 780px;
+      --ch: 440px;
+
+      /* 画面表示サイズ */
+      --view-scale: 0.90;
+
+      --sky1: #bfe9ff;
+      --sky2: #86d2ff;
+      --ground1: #2c8a3e;
+      --ground2: #1f6b2f;
+    }
+
+    html,body{ height:100%; }
+    body{
+      margin:0;
+      display:grid;
+      place-items:center;
+      background:#111;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans JP", sans-serif;
+      user-select:none;
+      -webkit-user-select:none;
+      touch-action: manipulation;
+    }
+
+    .wrap{
+      width:min(calc(var(--cw) * var(--view-scale)), 100vw);
+      aspect-ratio: 780 / 440;
+      position:relative;
+    }
+
+    canvas{
+      width:100%;
+      height:100%;
+      display:block;
+      background: linear-gradient(var(--sky1), var(--sky2));
+      /* border-radius: 14px;  ←削除 */
+      box-shadow: 0 14px 60px rgba(0,0,0,.45);
+      cursor:pointer;
+    }
+
+    .hud{
+      position:absolute;
+      inset:0;
+      pointer-events:none;
+      display:flex;
+      flex-direction:column;
+      justify-content:space-between;
+      padding:12px;
+      color:#fff;
+      text-shadow: 0 2px 0 rgba(0,0,0,.25);
+      font-weight:700;
+    }
+    .top{
+      display:flex;
+      gap:10px;
+      align-items:center;
+      justify-content:space-between;
+      font-size:13px;
+    }
+    .pill{
+      background: rgba(0,0,0,.35);
+      padding:7px 10px;
+      border-radius:999px;
+      backdrop-filter: blur(6px);
+      border: 1px solid rgba(255,255,255,.12);
+    }
+    .hint{
+      font-size:12px;
+      opacity:.9;
+      font-weight:650;
+    }
+
+    .centerMessage{
+      position:absolute;
+      inset:0;
+      display:grid;
+      place-items:center;
+      pointer-events:none;
+    }
+    .centerMessage > div{
+      background: rgba(0,0,0,.55);
+      color:#fff;
+      padding:14px 16px;
+      border-radius:12px;
+      font-size:20px;
+      font-weight:850;
+      letter-spacing:.04em;
+      backdrop-filter: blur(6px);
+      border: 1px solid rgba(255,255,255,.15);
+      text-align:center;
+      max-width:min(520px, 92%);
+    }
+    .sub{
+      margin-top:8px;
+      font-size:13px;
+      font-weight:650;
+      opacity:.92;
+      line-height:1.4;
+    }
+
+    .reward{
+      pointer-events:auto;
+      margin-top:12px;
+      display:inline-flex;
+      gap:10px;
+      justify-content:center;
+      align-items:center;
+    }
+    .btn{
+      pointer-events:auto;
+      border:none;
+      font-weight:800;
+      padding:10px 14px;
+      border-radius:12px;
+      background:#fff;
+      color:#111;
+      cursor:pointer;
+    }
+    .btn:active{ transform: translateY(1px); }
+    .btn.secondary{
+      background: rgba(255,255,255,.18);
+      color:#fff;
+      border:1px solid rgba(255,255,255,.22);
+      backdrop-filter: blur(6px);
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <canvas id="game" width="780" height="440" aria-label="Runner Game"></canvas>
+
+    <div class="hud">
+      <div class="top">
+        <div class="pill" id="statusPill">READY</div>
+        <div class="pill">距離: <span id="dist">0</span> / <span id="goal">1200</span> m</div>
+      </div>
+      <div class="hint">操作: クリック（開始/ジャンプ）・スペースでもジャンプ（※音が鳴らない時は一度クリック）</div>
+    </div>
+
+    <div class="centerMessage" id="centerMessage">
+      <div id="centerBox">
+        クリックでスタート
+        <div class="sub">開始後：クリックでジャンプ / 障害物に当たるとゲームオーバー</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // =========================================================
+    //  差し替えポイント（画像/音/URL/確率/速度など）
+    // =========================================================
+    const CFG = {
+      goalDistance: 2200,
+
+      baseSpeed: 260,
+      speedUpPerSec: 6,
+
+      flySpeedFactor: 3.15,
+
+      gravity: 2100,
+      jumpV: 820,
+
+      // ★地面・キャラ・敵を上に移動（地面が見切れにくい）
+      // 旧: 440 - 120 (= 320) → 新: 少し上へ（例: 290）
+      groundY: 290,
+
+      obstacleMinGap: 220,
+      obstacleMaxGap: 520,
+
+      safeStartTime: 0.6,
+
+      cloudParallax: 0.25,
+      hillParallax: 0.6,
+
+      rewardUrl: "https://example.com/reward",
+
+      spawnWeights: {
+        crate: 22,
+        cactus: 18,
+        rock: 18,
+        imgGround1: 14,
+        imgGround2: 14,
+        imgFly1: 3,
+        imgFly2: 3,
+      }
+    };
+
+    const ASSETS = {
+      images: {
+        imgGround1: "enemy_ground_1.png",
+        imgGround2: "enemy_ground_2.png",
+        imgFly1: "enemy_fly_1.png",
+        imgFly2: "enemy_fly_2.png",
+        playerFace: "face.png"
+      },
+      audio: {
+        bgm: "bgm.mp3",
+        jump: "se_jump.mp3",
+        gameover: "se_gameover.mp3",
+        clear: "se_clear.mp3",
+        spawn_imgGround1: "se_spawn_ground1.mp3",
+        spawn_imgGround2: "se_spawn_ground2.mp3",
+        spawn_imgFly1: "se_spawn_fly1.mp3",
+        spawn_imgFly2: "se_spawn_fly2.mp3",
+      }
+    };
+
+    // =========================================================
+    //  Canvas & UI
+    // =========================================================
+    const canvas = document.getElementById("game");
+    const ctx = canvas.getContext("2d");
+
+    const statusPill = document.getElementById("statusPill");
+    const distEl = document.getElementById("dist");
+    const goalEl = document.getElementById("goal");
+    const centerMessage = document.getElementById("centerMessage");
+    const centerBox = document.getElementById("centerBox");
+
+    const W = canvas.width;
+    const H = canvas.height;
+    goalEl.textContent = CFG.goalDistance;
+
+    const State = { READY:"READY", RUNNING:"RUNNING", GAMEOVER:"GAMEOVER", CLEAR:"CLEAR" };
+    let state = State.READY;
+
+    // =========================================================
+    //  Audio
+    // =========================================================
+    const audio = {
+      unlocked: false,
+      bgm: null,
+      se: {},
+      unlock(){
+        if(this.unlocked) return;
+        this.unlocked = true;
+
+        this.bgm = createAudio(ASSETS.audio.bgm, true, 0.55);
+
+        this.se.jump = createAudio(ASSETS.audio.jump, false, 0.85);
+        this.se.gameover = createAudio(ASSETS.audio.gameover, false, 0.9);
+        this.se.clear = createAudio(ASSETS.audio.clear, false, 0.9);
+
+        this.se.spawn_imgGround1 = createAudio(ASSETS.audio.spawn_imgGround1, false, 0.8);
+        this.se.spawn_imgGround2 = createAudio(ASSETS.audio.spawn_imgGround2, false, 0.8);
+        this.se.spawn_imgFly1 = createAudio(ASSETS.audio.spawn_imgFly1, false, 0.8);
+        this.se.spawn_imgFly2 = createAudio(ASSETS.audio.spawn_imgFly2, false, 0.8);
+      },
+      playSE(name){
+        if(!this.unlocked) return;
+        const a = this.se[name];
+        if(!a) return;
+        try{
+          a.currentTime = 0;
+          a.play().catch(()=>{});
+        }catch(_){}
+      },
+      playBGM(){
+        if(!this.unlocked) return;
+        if(!this.bgm) return;
+        this.bgm.play().catch(()=>{});
+      },
+      stopBGM(){
+        if(!this.bgm) return;
+        try{ this.bgm.pause(); }catch(_){}
+      }
+    };
+
+    function createAudio(src, loop=false, volume=0.8){
+      const a = new Audio();
+      a.src = src;
+      a.loop = loop;
+      a.volume = volume;
+      a.preload = "auto";
+      return a;
+    }
+
+    // =========================================================
+    //  Images
+    // =========================================================
+    const images = {};
+    function loadImage(key, url){
+      if(!url) return;
+      const img = new Image();
+      img.src = url;
+      images[key] = img;
+    }
+    loadImage("imgGround1", ASSETS.images.imgGround1);
+    loadImage("imgGround2", ASSETS.images.imgGround2);
+    loadImage("imgFly1", ASSETS.images.imgFly1);
+    loadImage("imgFly2", ASSETS.images.imgFly2);
+
+    if(ASSETS.images.playerFace){
+      loadImage("playerFace", ASSETS.images.playerFace);
+    }
+
+    // =========================================================
+    //  Input
+    // =========================================================
+    function onAction(){
+      audio.unlock();
+
+      if(state === State.READY){
+        startGame();
+        return;
+      }
+      if(state === State.RUNNING){
+        jump();
+        return;
+      }
+      if(state === State.GAMEOVER || state === State.CLEAR){
+        location.reload();
+        return;
+      }
+
+    }
+    canvas.addEventListener("pointerdown", onAction);
+    window.addEventListener("keydown", (e)=>{
+      if(e.code === "Space"){
+        e.preventDefault();
+        onAction();
+      }
+    }, {passive:false});
+
+    // =========================================================
+    //  Player（大きめ）
+    // =========================================================
+    const player = {
+      x: 170,
+      w: 78,
+      h: Math.round(H * 0.30),
+      y: CFG.groundY,
+      vy: 0,
+      onGround: true,
+      face: { type: "text", text: "☺" }
+    };
+
+    // =========================================================
+    //  Background
+    // =========================================================
+    const clouds = Array.from({length: 7}, ()=>({
+      x: Math.random()*W,
+      y: 25 + Math.random()*150,
+      s: 0.6 + Math.random()*1.1,
+      w: 70 + Math.random()*140
+    }));
+
+    const hills = Array.from({length: 5}, (_,i)=>({
+      x: i*(W/2) + Math.random()*120,
+      y: CFG.groundY + 10,
+      r: 110 + Math.random()*140
+    }));
+
+    let groundOffset = 0;
+
+    // =========================================================
+    //  Obstacles
+    // =========================================================
+    const obstacles = [];
+    let nextObstacleX = W + 260;
+
+    function pickSpawnType(){
+      const entries = Object.entries(CFG.spawnWeights).filter(([,w])=>w>0);
+      const total = entries.reduce((s,[,w])=>s+w,0);
+      let r = Math.random()*total;
+      for(const [k,w] of entries){
+        r -= w;
+        if(r <= 0) return k;
+      }
+      return entries[entries.length-1][0];
+    }
+
+    function spawnObstacle(){
+      const type = pickSpawnType();
+
+      let w = 52, h = 52;
+      let isFly = false;
+      let y = 0;
+      let speedFactor = 1.0;
+
+      if(type === "crate"){ w=56; h=56; }
+      if(type === "cactus"){ w=42; h=78; }
+      if(type === "rock"){ w=62; h=44; }
+
+      if(type === "imgGround1"){ w=72; h=56; }
+      if(type === "imgGround2"){ w=60; h=68; }
+
+      if(type === "imgFly1"){ w=74; h=52; isFly=true; speedFactor = CFG.flySpeedFactor; }
+      if(type === "imgFly2"){ w=62; h=62; isFly=true; speedFactor = CFG.flySpeedFactor; }
+
+      if(isFly){
+        const bandTop = CFG.groundY - player.h * 0.95;
+        const bandBottom = CFG.groundY - player.h * 0.55;
+        y = bandTop + Math.random() * Math.max(10, (bandBottom - bandTop));
+      }else{
+        y = CFG.groundY + (player.h - h);
+      }
+
+      obstacles.push({ type, x: nextObstacleX, y, w, h, speedFactor, isFly });
+
+      if(type.startsWith("img")){
+        audio.playSE("spawn_" + type);
+      }
+
+      const gap = CFG.obstacleMinGap + Math.random()*(CFG.obstacleMaxGap - CFG.obstacleMinGap);
+      nextObstacleX += gap;
+    }
+
+    // =========================================================
+    //  Distance / Speed
+    // =========================================================
+    let distance = 0;
+    let speed = CFG.baseSpeed;
+    let elapsed = 0;
+
+    // =========================================================
+    //  Loop
+    // =========================================================
+    let lastT = 0;
+    function loop(t){
+      const dt = Math.min(0.033, (t - lastT)/1000 || 0);
+      lastT = t;
+
+      update(dt);
+      render();
+
+      requestAnimationFrame(loop);
+    }
+    requestAnimationFrame(loop);
+
+    // =========================================================
+    //  Game control
+    // =========================================================
+    function startGame(){
+      state = State.RUNNING;
+      statusPill.textContent = "RUN";
+      centerMessage.style.display = "none";
+      audio.playBGM();
+    }
+
+    function resetGame(){
+      state = State.READY;
+      statusPill.textContent = "READY";
+      centerMessage.style.display = "grid";
+      centerBox.innerHTML = `クリックでスタート<div class="sub">開始後：クリックでジャンプ / 障害物に当たるとゲームオーバー</div>`;
+
+      obstacles.length = 0;
+      nextObstacleX = W + 260;
+
+      distance = 0;
+      speed = CFG.baseSpeed;
+      elapsed = 0;
+
+      player.y = CFG.groundY;
+      player.vy = 0;
+      player.onGround = true;
+
+      groundOffset = 0;
+
+      // 丘の基準位置も地面に追従させる
+      for(const h of hills){
+        h.y = CFG.groundY + 10;
+      }
+
+      audio.stopBGM();
+    }
+
+    function gameOver(){
+      state = State.GAMEOVER;
+      statusPill.textContent = "GAME OVER";
+      centerMessage.style.display = "grid";
+      centerBox.innerHTML = `ゲームオーバー<div class="sub">クリックでリスタート</div>`;
+      audio.stopBGM();
+      audio.playSE("gameover");
+    }
+
+    function clearGame(){
+      state = State.CLEAR;
+      statusPill.textContent = "CLEAR!";
+      centerMessage.style.display = "grid";
+
+      centerBox.innerHTML = `
+        クリア！
+        <div class="sub">ご褒美ページへジャンプできます（別タブ）</div>
+        <div class="reward">
+          <button class="btn" id="rewardBtn">ご褒美へ</button>
+          <button class="btn secondary" id="retryBtn">もう一回</button>
+        </div>
+      `;
+
+      setTimeout(()=>{
+        const rewardBtn = document.getElementById("rewardBtn");
+        const retryBtn = document.getElementById("retryBtn");
+        if(rewardBtn){
+          rewardBtn.addEventListener("click", ()=>{
+            // ★別タブで開く
+            window.open(CFG.rewardUrl, "_blank", "noopener,noreferrer");
+          });
+        }
+        if(retryBtn){
+          retryBtn.addEventListener("click", ()=>{
+            location.reload();
+          });
+        }
+
+      }, 0);
+
+      audio.stopBGM();
+      audio.playSE("clear");
+    }
+
+    function jump(){
+      if(!player.onGround) return;
+      player.vy = -CFG.jumpV;
+      player.onGround = false;
+      audio.playSE("jump");
+    }
+
+    // =========================================================
+    //  Update
+    // =========================================================
+    function update(dt){
+      if(state !== State.RUNNING) return;
+
+      elapsed += dt;
+      speed += CFG.speedUpPerSec * dt;
+
+      distance += (speed * dt) * 0.25;
+      distEl.textContent = Math.floor(distance);
+
+      if(distance >= CFG.goalDistance){
+        clearGame();
+        return;
+      }
+
+      player.vy += CFG.gravity * dt;
+      player.y += player.vy * dt;
+
+      if(player.y >= CFG.groundY){
+        player.y = CFG.groundY;
+        player.vy = 0;
+        player.onGround = true;
+      }
+
+      const dx = speed * dt;
+      groundOffset = (groundOffset + dx) % 80;
+
+      for(const c of clouds){
+        c.x -= dx * CFG.cloudParallax * c.s;
+        if(c.x < -c.w - 40) c.x = W + Math.random()*240;
+      }
+      for(const h of hills){
+        h.x -= dx * CFG.hillParallax;
+        if(h.x < -h.r*1.6) h.x = W + Math.random()*220;
+        // 地面変更に追従（保険）
+        h.y = CFG.groundY + 10;
+      }
+
+      if(elapsed > CFG.safeStartTime){
+        if(obstacles.length < 14 && nextObstacleX < W + 1400){
+          spawnObstacle();
+        }
+        nextObstacleX -= dx;
+      }
+
+      for(const o of obstacles){
+        const localDx = dx * (o.speedFactor ?? 1.0);
+        o.x -= localDx;
+      }
+
+      while(obstacles.length && obstacles[0].x + obstacles[0].w < -70){
+        obstacles.shift();
+      }
+
+      const p = getPlayerHitbox();
+      for(const o of obstacles){
+        const ob = {x:o.x, y:o.y, w:o.w, h:o.h};
+        if(aabb(p, ob)){
+          gameOver();
+          return;
+        }
+      }
+    }
+
+    function getPlayerHitbox(){
+      return {
+        x: player.x + 12,
+        y: player.y + 10,
+        w: player.w - 24,
+        h: player.h - 14
+      };
+    }
+
+    function aabb(a,b){
+      return (a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y);
+    }
+
+    // =========================================================
+    //  Render
+    // =========================================================
+    function render(){
+      ctx.clearRect(0,0,W,H);
+      drawSky();
+      drawClouds();
+      drawHills();
+      drawGround();
+      drawFinishLineHint();
+      drawObstacles();
+      drawPlayer();
+      drawVignette();
+    }
+
+    function drawSky(){
+      const g = ctx.createLinearGradient(0,0,0,H);
+      g.addColorStop(0,"rgba(255,255,255,0.14)");
+      g.addColorStop(1,"rgba(0,0,0,0.05)");
+      ctx.fillStyle = g;
+      ctx.fillRect(0,0,W,H);
+    }
+
+    function drawClouds(){
+      for(const c of clouds){
+        ctx.save();
+        ctx.globalAlpha = 0.85;
+        ctx.fillStyle = "rgba(255,255,255,0.95)";
+        const x=c.x,y=c.y,w=c.w,h=w*0.38;
+        ctx.beginPath();
+        ctx.ellipse(x, y, w*0.26, h*0.55, 0, 0, Math.PI*2);
+        ctx.ellipse(x+w*0.22, y-h*0.18, w*0.22, h*0.50, 0, 0, Math.PI*2);
+        ctx.ellipse(x+w*0.44, y, w*0.28, h*0.62, 0, 0, Math.PI*2);
+        ctx.ellipse(x+w*0.66, y-h*0.10, w*0.22, h*0.52, 0, 0, Math.PI*2);
+        ctx.ellipse(x+w*0.82, y, w*0.20, h*0.46, 0, 0, Math.PI*2);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+
+    function drawHills(){
+      for(const h of hills){
+        ctx.save();
+        ctx.globalAlpha = 0.9;
+        ctx.fillStyle = "rgba(0,0,0,0.08)";
+        ctx.beginPath();
+        ctx.arc(h.x, h.y, h.r*1.15, Math.PI, Math.PI*2);
+        ctx.fill();
+
+        ctx.fillStyle = "rgba(55,150,90,0.75)";
+        ctx.beginPath();
+        ctx.arc(h.x, h.y, h.r, Math.PI, Math.PI*2);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+
+    function drawGround(){
+      // ★地面の“厚み”を明示して、見切れづらくする
+      const groundTop = CFG.groundY + player.h - 14; // 上端（草の上面）
+      ctx.fillStyle = getCSSVar("--ground1");
+      ctx.fillRect(0, groundTop, W, H - groundTop);
+
+      // 走路帯
+      ctx.fillStyle = "rgba(0,0,0,0.12)";
+      ctx.fillRect(0, groundTop - 14, W, 10);
+
+      // 草タイル
+      const tileW = 80;
+      for(let x=-tileW; x < W + tileW; x += tileW){
+        const tx = x - groundOffset;
+        ctx.fillStyle = (Math.floor((x/tileW)) % 2 === 0) ? getCSSVar("--ground2") : "rgba(0,0,0,0.10)";
+        ctx.fillRect(tx, groundTop, tileW, 14);
+      }
+    }
+
+    function drawFinishLineHint(){
+      if(state !== State.RUNNING) return;
+      const remain = CFG.goalDistance - distance;
+      if(remain > 220) return;
+
+      const alpha = Math.max(0, 1 - remain / 220);
+      const x = W - 120;
+      const baseY = CFG.groundY + player.h - 14;
+
+      ctx.save();
+      ctx.globalAlpha = 0.2 + 0.8*alpha;
+      ctx.fillStyle = "rgba(30,30,30,0.7)";
+      ctx.fillRect(x, baseY - 160, 8, 160);
+
+      ctx.fillStyle = "rgba(255,255,255,0.9)";
+      ctx.beginPath();
+      ctx.moveTo(x+8, baseY-155);
+      ctx.lineTo(x+90, baseY-135);
+      ctx.lineTo(x+8, baseY-115);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.fillStyle = "rgba(0,0,0,0.75)";
+      ctx.fillRect(x+18, baseY-148, 12, 12);
+      ctx.fillRect(x+42, baseY-148, 12, 12);
+      ctx.fillRect(x+30, baseY-136, 12, 12);
+      ctx.fillRect(x+54, baseY-136, 12, 12);
+      ctx.restore();
+    }
+
+    function drawObstacles(){
+      for(const o of obstacles){
+        // 影（地面基準に）
+        ctx.save();
+        ctx.globalAlpha = 0.22;
+        ctx.fillStyle = "#000";
+        ctx.beginPath();
+        ctx.ellipse(o.x+o.w/2, CFG.groundY + player.h - 10, o.w*0.5, 8, 0, 0, Math.PI*2);
+        ctx.fill();
+        ctx.restore();
+
+        if(o.type === "crate" || o.type === "cactus" || o.type === "rock"){
+          drawShapeObstacle(o);
+        }else{
+          drawImageObstacle(o);
+        }
+      }
+    }
+
+    function drawShapeObstacle(o){
+      ctx.save();
+      if(o.type === "crate"){
+        ctx.fillStyle = "rgba(140,90,45,0.95)";
+        roundRect(o.x, o.y, o.w, o.h, 8);
+        ctx.fill();
+        ctx.strokeStyle = "rgba(0,0,0,0.25)";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(o.x+10, o.y+10);
+        ctx.lineTo(o.x+o.w-10, o.y+o.h-10);
+        ctx.moveTo(o.x+o.w-10, o.y+10);
+        ctx.lineTo(o.x+10, o.y+o.h-10);
+        ctx.stroke();
+      } else if(o.type === "cactus"){
+        ctx.fillStyle = "rgba(30,120,70,0.95)";
+        roundRect(o.x+10, o.y, o.w-20, o.h, 10); ctx.fill();
+        roundRect(o.x, o.y+18, 16, 26, 10); ctx.fill();
+        roundRect(o.x+o.w-16, o.y+26, 16, 26, 10); ctx.fill();
+      } else {
+        ctx.fillStyle = "rgba(90,90,95,0.95)";
+        ctx.beginPath();
+        ctx.moveTo(o.x+8, o.y+o.h);
+        ctx.quadraticCurveTo(o.x+2, o.y+o.h*0.6, o.x+18, o.y+o.h*0.35);
+        ctx.quadraticCurveTo(o.x+o.w*0.45, o.y-6, o.x+o.w-10, o.y+o.h*0.35);
+        ctx.quadraticCurveTo(o.x+o.w+6, o.y+o.h*0.7, o.x+o.w-8, o.y+o.h);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    function drawImageObstacle(o){
+      const img = images[o.type];
+      if(img && img.complete && img.naturalWidth > 0){
+        //ctx.drawImage(img, o.x, o.y, o.w, o.h);
+drawImageContain(ctx, img, o.x, o.y, o.w, o.h);
+
+      }else{
+        ctx.save();
+        ctx.fillStyle = "rgba(255,255,255,0.85)";
+        ctx.strokeStyle = "rgba(0,0,0,0.35)";
+        ctx.lineWidth = 2;
+        roundRect(o.x, o.y, o.w, o.h, 10);
+        ctx.fill(); ctx.stroke();
+
+        ctx.fillStyle = "rgba(0,0,0,0.75)";
+        ctx.font = "12px system-ui, sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(o.type, o.x + o.w/2, o.y + o.h/2);
+        ctx.restore();
+      }
+    }
+
+    function drawPlayer(){
+      const x = player.x;
+      const y = player.y;
+      const w = player.w;
+      const h = player.h;
+
+      // 影
+      ctx.save();
+      ctx.globalAlpha = 0.25;
+      ctx.fillStyle = "#000";
+      ctx.beginPath();
+      ctx.ellipse(x + w/2, CFG.groundY + h - 10, 28, 9, 0, 0, Math.PI*2);
+      ctx.fill();
+      ctx.restore();
+
+      ctx.save();
+      ctx.fillStyle = "rgba(35,35,40,0.92)";
+      roundedRect(x, y+Math.round(h*0.16), w, h-Math.round(h*0.16), 12);
+      ctx.fill();
+
+      ctx.fillStyle = "rgba(255,255,255,0.10)";
+      roundedRect(x+10, y+Math.round(h*0.42), w-20, 26, 10);
+      ctx.fill();
+
+      ctx.fillStyle = "rgba(20,20,22,0.95)";
+      roundedRect(x+6, y+h-28, 22, 28, 10); ctx.fill();
+      roundedRect(x+w-28, y+h-28, 22, 28, 10); ctx.fill();
+
+      ctx.fillStyle = "rgba(245,245,248,0.95)";
+      roundedRect(x+10, y, w-20, 36, 12);
+      ctx.fill();
+// ===============================
+// 顔エリア（描画だけ）
+//  - 旧顔枠: (w-36) × 20 の「高さ 20」を基準に
+//  - サイズを 1.5倍 → 30px の正方形に
+// ===============================
+const oldFaceH = 50;
+const faceSize = Math.round(oldFaceH * 2); // ★修正前より1.5倍大きい正方形（=30px）
+
+const faceX = x + (w - faceSize) / 2;
+const faceY = y - 20; // 少し上寄せ（好みで調整OK）
+
+// 顔枠（ガイド）
+/*
+ctx.strokeStyle = "rgba(0,0,0,0.18)";
+ctx.lineWidth = 0;
+roundedRect(faceX, faceY, faceSize, faceSize, 8);
+ctx.stroke();
+*/
+
+// 顔描画（画像があれば contain、なければ文字）
+const faceImg = images.playerFace;
+if(faceImg && faceImg.complete && faceImg.naturalWidth > 0){
+  ctx.save();
+  ctx.beginPath();
+  roundedRect(faceX, faceY, faceSize, faceSize, 8);
+  ctx.clip();
+
+  // object-fit: contain 相当
+  drawImageContain(ctx, faceImg, faceX, faceY, faceSize, faceSize);
+
+  ctx.restore();
+}else{
+  ctx.fillStyle = "rgba(0,0,0,0.72)";
+  ctx.font = "16px system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(player.face.text, faceX + faceSize/2, faceY + faceSize/2);
+}
+
+
+      ctx.restore();
+    }
+
+    function drawVignette(){
+      const g = ctx.createRadialGradient(W/2,H/2,100, W/2,H/2, Math.max(W,H)*0.75);
+      g.addColorStop(0, "rgba(0,0,0,0)");
+      g.addColorStop(1, "rgba(0,0,0,0.18)");
+      ctx.fillStyle = g;
+      ctx.fillRect(0,0,W,H);
+    }
+
+    function roundRect(x, y, w, h, r){
+      if (typeof r === "number") r = {tl:r,tr:r,br:r,bl:r};
+      ctx.beginPath();
+      ctx.moveTo(x+r.tl, y);
+      ctx.lineTo(x+w-r.tr, y);
+      ctx.quadraticCurveTo(x+w, y, x+w, y+r.tr);
+      ctx.lineTo(x+w, y+h-r.br);
+      ctx.quadraticCurveTo(x+w, y+h, x+w-r.br, y+h);
+      ctx.lineTo(x+r.bl, y+h);
+      ctx.quadraticCurveTo(x, y+h, x, y+h-r.bl);
+      ctx.lineTo(x, y+r.tl);
+      ctx.quadraticCurveTo(x, y, x+r.tl, y);
+      ctx.closePath();
+    }
+
+    function roundedRect(x,y,w,h,r){
+      ctx.beginPath();
+      ctx.moveTo(x+r, y);
+      ctx.lineTo(x+w-r, y);
+      ctx.quadraticCurveTo(x+w, y, x+w, y+r);
+      ctx.lineTo(x+w, y+h-r);
+      ctx.quadraticCurveTo(x+w, y+h, x+w-r, y+h);
+      ctx.lineTo(x+r, y+h);
+      ctx.quadraticCurveTo(x, y+h, x, y+h-r);
+      ctx.lineTo(x, y+r);
+      ctx.quadraticCurveTo(x, y, x+r, y);
+      ctx.closePath();
+    }
+
+    function getCSSVar(name){
+      return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    }
+
+// ===============================
+// Canvas用 object-fit: contain
+// ===============================
+function drawImageContain(ctx, img, x, y, w, h){
+  const iw = img.naturalWidth;
+  const ih = img.naturalHeight;
+  if(!iw || !ih) return;
+
+  const scale = Math.min(w / iw, h / ih);
+  const dw = iw * scale;
+  const dh = ih * scale;
+
+  const dx = x + (w - dw) / 2;
+  const dy = y + (h - dh) / 2;
+
+  ctx.drawImage(img, dx, dy, dw, dh);
+}
+
+  </script>
+</body>
+</html>
